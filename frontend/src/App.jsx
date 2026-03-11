@@ -4,7 +4,11 @@ import { Bot, Play, Square, Loader2, QrCode, MessageSquare, AlertCircle, Clock, 
 import axios from 'axios';
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:3001';
-const socket = io(BACKEND_URL);
+const socket = io(BACKEND_URL, {
+  transports: ['websocket', 'polling'],
+  reconnectionAttempts: 5,
+  timeout: 10000
+});
 const API_URL = `${BACKEND_URL}/api`;
 
 function App() {
@@ -50,6 +54,16 @@ function App() {
 
     socket.on('log', (logMessage) => {
       setLogs(prev => [...prev, { id: Date.now() + Math.random(), text: logMessage }]);
+    });
+
+    socket.on('connect', () => {
+      console.log('Successfully connected to socket server');
+      setLogs(prev => [...prev, { id: Date.now(), text: 'Connected to live server!' }]);
+    });
+
+    socket.on('connect_error', (error) => {
+      console.error('Socket connection error:', error);
+      setLogs(prev => [...prev, { id: Date.now(), text: `Connection Error: ${error.message}` }]);
     });
 
     return () => {
