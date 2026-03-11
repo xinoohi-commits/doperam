@@ -60,27 +60,51 @@ function initializeClient() {
     currentQR = null;
     broadcastState();
 
+    console.log('[WHATSAPP] Initializing client...');
     client = new Client({
         authStrategy: new LocalAuth(),
         puppeteer: {
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
+            headless: true,
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--no-first-run',
+                '--no-zygote',
+                '--single-process',
+                '--disable-gpu'
+            ],
+            // On Railway/Linux, we might need a specific path, but letting puppeteer find it first
         }
     });
 
     client.on('qr', (qr) => {
+        console.log('[WHATSAPP] QR Code received');
         currentQR = qr;
-        clientStatus = 'DISCONNECTED'; // Wait for scan
+        clientStatus = 'DISCONNECTED';
         broadcastState();
     });
 
     client.on('ready', () => {
+        console.log('[WHATSAPP] Client is ready!');
         currentQR = null;
         clientStatus = 'CONNECTED';
         io.emit('log', 'Client is ready and connected to WhatsApp!');
         broadcastState();
     });
 
+    client.on('authenticated', () => {
+        console.log('[WHATSAPP] Authenticated successfully');
+    });
+
+    client.on('auth_failure', (msg) => {
+        console.error('[WHATSAPP] Authentication failure:', msg);
+        io.emit('log', `Auth failure: ${msg}`);
+    });
+
     client.on('disconnected', (reason) => {
+        console.log('[WHATSAPP] Client disconnected:', reason);
         clientStatus = 'DISCONNECTED';
         currentQR = null;
         isBotRunning = false;
@@ -88,10 +112,14 @@ function initializeClient() {
         io.emit('log', `Client was logged out: ${reason}`);
         broadcastState();
         // Restart client to get new QR
+        console.log('[WHATSAPP] Restarting client...');
         initializeClient();
     });
 
-    client.initialize();
+    client.initialize().catch(err => {
+        console.error('[WHATSAPP] Failed to initialize client:', err);
+        io.emit('log', `Initialization Error: ${err.message}`);
+    });
 }
 
 // Bot auto-messaging logic
@@ -300,6 +328,12 @@ app.post('/api/logout', async (req, res) => {
         console.error('[API] Error during hard logout:', err);
         res.status(500).json({ error: 'Failed to complete logout', details: err.message });
     }
+});
+
+// Catch-all for undefined routes (helpful for debugging 404s on Railway)
+app.use((req, res) => {
+    console.log(`[SERVER] 404 - Not Found: ${req.method} ${req.url}`);
+    res.status(404).json({ error: 'Not Found', path: req.url });
 });
 
 

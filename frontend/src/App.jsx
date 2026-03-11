@@ -62,8 +62,9 @@ function App() {
     });
 
     socket.on('connect_error', (error) => {
-      console.error('Socket connection error:', error);
-      setLogs(prev => [...prev, { id: Date.now(), text: `Connection Error: ${error.message}` }]);
+      console.error('Socket connection error details:', error);
+      console.error('Transport used:', socket.io.engine.transport.name);
+      setLogs(prev => [...prev, { id: Date.now(), text: `Connection Error (${socket.io.engine.transport.name}): ${error.message}` }]);
     });
 
     return () => {
