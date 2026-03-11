@@ -195,6 +195,15 @@ async function startAutoBotFlow() {
 
 // --- API Endpoints ---
 
+app.get('/health', (req, res) => {
+    res.json({ 
+        status: 'UP', 
+        whatsapp: clientStatus, 
+        bot: isBotRunning,
+        time: new Date().toISOString()
+    });
+});
+
 // Get all groups
 app.get('/api/groups', async (req, res) => {
     console.log('[API] GET /groups requested');
@@ -312,9 +321,12 @@ io.on('connection', (socket) => {
 });
 
 
+const HOST = '0.0.0.0';
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => {
-    console.log(`Backend server running on http://localhost:${PORT}`);
+
+server.listen(PORT, HOST, () => {
+    console.log(`[SERVER] Backend server running on http://${HOST}:${PORT}`);
+    console.log(`[SERVER] CORS allowed for all origins (*)`);
     // Initialize WhatsApp client
     initializeClient();
 });
