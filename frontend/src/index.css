@@ -1,0 +1,43 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-[#0b141a] text-[#e9edef] antialiased m-0 p-0 font-sans;
+  }
+}
+
+.glass-panel {
+  @apply bg-[#202c33]/90 backdrop-blur-md border border-[#2a3942] rounded-xl shadow-2xl;
+}
+
+.input-field {
+  @apply w-full bg-[#2a3942] border border-[#202c33] rounded-lg px-4 py-3 text-[#e9edef] placeholder-[#8696a0] focus:outline-none focus:border-whatsapp-light focus:ring-1 focus:ring-whatsapp-light transition-all;
+}
+
+.btn-primary {
+  @apply w-full bg-whatsapp-light hover:bg-[#1faa59] text-[#111b21] font-bold py-3 px-4 rounded-lg flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed;
+}
+
+.btn-danger {
+  @apply w-full bg-[#f15c6d] hover:bg-[#d94a5a] text-[#111b21] font-bold py-3 px-4 rounded-lg flex items-center justify-center gap-2 transition-all active:scale-95 shadow-lg shadow-[#f15c6d]/20;
+}
+
+/* Custom Scrollbar for Logs */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #374045;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #8696a0;
+}
