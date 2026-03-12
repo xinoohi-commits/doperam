@@ -1,10 +1,3 @@
-# Stage 1: Install node_modules
-FROM node:18-slim AS deps
-WORKDIR /app
-COPY backend/package*.json ./
-RUN npm install --omit=dev
-
-# Stage 2: Runtime with Chromium
 FROM node:18-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -26,7 +19,9 @@ ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
 
 WORKDIR /app
 
-COPY --from=deps /app/node_modules ./node_modules
+COPY backend/package*.json ./
+RUN npm install --omit=dev && npm cache clean --force
+
 COPY backend/ .
 
 CMD ["node", "index.js"]

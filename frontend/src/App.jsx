@@ -5,9 +5,9 @@ import axios from 'axios';
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:3001';
 const socket = io(BACKEND_URL, {
-  transports: ['websocket', 'polling'],
+  transports: ['polling', 'websocket'],
   reconnectionAttempts: 5,
-  timeout: 10000
+  timeout: 20000
 });
 const API_URL = `${BACKEND_URL}/api`;
 

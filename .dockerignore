@@ -1,0 +1,7 @@
+frontend
+.git
+backend/node_modules
+backend/.wwebjs_auth
+backend/.wwebjs_cache
+backend/.env
+*.md
