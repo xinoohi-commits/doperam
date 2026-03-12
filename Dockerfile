@@ -1,3 +1,10 @@
+FROM node:18-slim AS frontend
+WORKDIR /app
+COPY frontend/package*.json ./
+RUN npm install
+COPY frontend/ .
+RUN npm run build
+
 FROM node:18-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -23,5 +30,6 @@ COPY backend/package*.json ./
 RUN npm install --omit=dev && npm cache clean --force
 
 COPY backend/ .
+COPY --from=frontend /app/dist ./public
 
 CMD ["node", "index.js"]

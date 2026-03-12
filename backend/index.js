@@ -338,10 +338,18 @@ app.post('/api/logout', async (req, res) => {
     }
 });
 
-// Catch-all for undefined routes (helpful for debugging 404s on Railway)
+const path = require('path');
+
+// Serve frontend static files
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Catch-all: serve index.html for any non-API route (SPA support)
 app.use((req, res) => {
-    console.log(`[SERVER] 404 - Not Found: ${req.method} ${req.url}`);
-    res.status(404).json({ error: 'Not Found', path: req.url });
+    if (req.url.startsWith('/api/') || req.url.startsWith('/socket.io/')) {
+        console.log(`[SERVER] 404 - Not Found: ${req.method} ${req.url}`);
+        return res.status(404).json({ error: 'Not Found', path: req.url });
+    }
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 
