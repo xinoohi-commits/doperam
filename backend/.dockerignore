@@ -1,0 +1,11 @@
+node_modules
+.wwebjs_auth
+.wwebjs_cache
+frontend
+.git
+.env
+README.md
+Dockerfile
+.dockerignore
+*.md
+.gitignore
