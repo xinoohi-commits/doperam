@@ -1,22 +1,28 @@
 # Stage 1: Install node_modules
-FROM node:18-alpine AS deps
+FROM node:18-slim AS deps
 WORKDIR /app
 COPY package*.json ./
 RUN npm install --omit=dev
 
-# Stage 2: Minimal runtime
-FROM node:18-alpine
+# Stage 2: Runtime with Chromium
+FROM node:18-slim
 
-RUN apk add --no-cache \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
-    nss \
-    freetype \
-    harfbuzz \
-    ca-certificates \
-    ttf-freefont
+    fonts-liberation \
+    libatk-bridge2.0-0 \
+    libatk1.0-0 \
+    libcups2 \
+    libdrm2 \
+    libgbm1 \
+    libnss3 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxrandr2 \
+    && rm -rf /var/lib/apt/lists/*
 
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
-    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 WORKDIR /app
 
