@@ -3,7 +3,7 @@ import { io } from 'socket.io-client';
 import { Bot, Play, Square, Loader2, QrCode, MessageSquare, AlertCircle, Clock, CheckCircle2, LogOut, Paperclip, X, PlusCircle, LayoutDashboard, Settings, Trash2, RefreshCw } from 'lucide-react';
 import axios from 'axios';
 
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:3001';
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || (import.meta.env.PROD ? window.location.origin : 'http://127.0.0.1:3001');
 const socket = io(BACKEND_URL, {
   transports: ['polling', 'websocket'],
   reconnectionAttempts: 5,
