@@ -21,8 +21,8 @@ function App() {
     isBotRunning: false,
     autoMessageTargetGroup: '',
     autoMessageText: '',
-    minIntervalActive: 1,
-    maxIntervalActive: 2
+    minIntervalActive: 15,
+    maxIntervalActive: 20
   });
 
   const [groups, setGroups] = useState([]);
@@ -38,8 +38,8 @@ function App() {
   const [message, setMessage] = useState('');
   const [fileData, setFileData] = useState(null);
   const [fileName, setFileName] = useState('');
-  const [minDelay, setMinDelay] = useState(1);
-  const [maxDelay, setMaxDelay] = useState(2);
+  const [minDelay, setMinDelay] = useState(15);
+  const [maxDelay, setMaxDelay] = useState(20);
 
   const logsEndRef = useRef(null);
 
@@ -230,8 +230,8 @@ function App() {
         groupName: sendMode === 'group' ? selectedGroup : '',
         targetNumbers: sendMode === 'numbers' ? targetNumbers : '',
         message,
-        minMinutes: Number(minDelay),
-        maxMinutes: Number(maxDelay),
+        minSeconds: Number(minDelay),
+        maxSeconds: Number(maxDelay),
         media: fileData
       });
     } catch (err) {
@@ -583,10 +583,10 @@ function App() {
                   {/* Interval */}
                   <div className="grid grid-cols-2 gap-4">
                     <div>
-                      <label className="block text-[10px] text-[#8696a0] uppercase mb-1">Min Delay (Min)</label>
+                      <label className="block text-[10px] text-[#8696a0] uppercase mb-1">Min Delay (Sec)</label>
                       <input
                         type="number"
-                        min="1"
+                        min="5"
                         value={minDelay}
                         onChange={(e) => setMinDelay(e.target.value)}
                         className="input-field text-center"
@@ -595,10 +595,10 @@ function App() {
                       />
                     </div>
                     <div>
-                      <label className="block text-[10px] text-[#8696a0] uppercase mb-1">Max Delay (Min)</label>
+                      <label className="block text-[10px] text-[#8696a0] uppercase mb-1">Max Delay (Sec)</label>
                       <input
                         type="number"
-                        min="1"
+                        min="5"
                         value={maxDelay}
                         onChange={(e) => setMaxDelay(e.target.value)}
                         className="input-field text-center"

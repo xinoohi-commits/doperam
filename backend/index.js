@@ -3,9 +3,11 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
-app.use(cors()); // Allow all origins and methods
+app.use(cors());
 
 app.use(express.json({ limit: '60mb' }));
 app.use(express.urlencoded({ limit: '60mb', extended: true }));
@@ -19,6 +21,34 @@ const io = new Server(server, {
 });
 
 const sessions = {};
+
+// --- Utility: Timeout wrapper for Puppeteer calls ---
+function withTimeout(promise, ms, label = 'Operation') {
+    return Promise.race([
+        promise,
+        new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(`${label} timed out after ${ms / 1000}s`)), ms)
+        )
+    ]);
+}
+
+// --- Utility: Retry with exponential backoff ---
+async function retryWithBackoff(fn, { maxRetries = 3, baseDelayMs = 5000, label = 'Operation' } = {}) {
+    let lastError;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            return await fn();
+        } catch (err) {
+            lastError = err;
+            if (attempt < maxRetries) {
+                const delay = baseDelayMs * Math.pow(3, attempt - 1); // 5s, 15s, 45s
+                console.log(`[RETRY] ${label} attempt ${attempt}/${maxRetries} failed: ${err.message}. Retrying in ${delay / 1000}s...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+    }
+    throw lastError;
+}
 
 function broadcastState(sessionId) {
     const session = sessions[sessionId];
@@ -64,20 +94,26 @@ function initializeClient(sessionId) {
             autoMessageTargetNumbers: '',
             autoMessageText: '',
             autoMessageMedia: null,
-            minIntervalActive: 1,
-            maxIntervalActive: 2,
-            nextTimeoutId: null
+            minIntervalActive: 15,
+            maxIntervalActive: 20,
+            nextTimeoutId: null,
+            // --- New stability fields ---
+            cachedGroupId: null,       // cached group chat ID to avoid getChats() every cycle
+            consecutiveFailures: 0,    // track failures for auto-restart
+            pendingBotConfig: null,    // preserve bot config across auto-restarts
         };
     }
 
     const session = sessions[sessionId];
 
     if (session.client) {
-        session.client.destroy();
+        try { session.client.destroy(); } catch (e) { /* ignore */ }
     }
 
     session.clientStatus = 'CONNECTING';
     session.currentQR = null;
+    session.cachedGroupId = null;
+    session.consecutiveFailures = 0;
     broadcastState(sessionId);
 
     console.log(`[WHATSAPP - ${sessionId}] Initializing client...`);
@@ -86,7 +122,7 @@ function initializeClient(sessionId) {
         puppeteer: {
             executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
             headless: 'new',
-            protocolTimeout: 180000,
+            protocolTimeout: 300000, // 5 minutes (up from 3 minutes)
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
@@ -104,7 +140,16 @@ function initializeClient(sessionId) {
                 '--js-flags=--max-old-space-size=256',
                 '--disable-web-security',
                 '--no-zygote',
-                '--disable-features=IsolateOrigins,site-per-process'
+                '--disable-features=IsolateOrigins,site-per-process',
+                // --- New memory optimization flags ---
+                '--single-process',
+                '--renderer-process-limit=1',
+                '--disable-component-update',
+                '--disable-background-timer-throttling',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-renderer-backgrounding',
+                '--disable-logging',
+                '--disable-breakpad',
             ],
         }
     });
@@ -120,8 +165,28 @@ function initializeClient(sessionId) {
         console.log(`[WHATSAPP - ${sessionId}] Client is ready!`);
         session.currentQR = null;
         session.clientStatus = 'CONNECTED';
+        session.consecutiveFailures = 0;
         sendLog(sessionId, 'Client is ready and connected to WhatsApp!');
         broadcastState(sessionId);
+
+        // If there's a pending bot config (from auto-restart), resume the bot
+        if (session.pendingBotConfig) {
+            const config = session.pendingBotConfig;
+            session.pendingBotConfig = null;
+            console.log(`[WHATSAPP - ${sessionId}] Resuming bot after auto-restart...`);
+            sendLog(sessionId, '🔄 Auto-resuming bot after browser restart...');
+            
+            session.autoMessageSendMode = config.sendMode;
+            session.autoMessageTargetGroup = config.groupName;
+            session.autoMessageTargetNumbers = config.targetNumbers;
+            session.autoMessageText = config.message;
+            session.autoMessageMedia = config.media;
+            session.minIntervalActive = config.minMinutes;
+            session.maxIntervalActive = config.maxMinutes;
+            
+            // Small delay to let WhatsApp Web fully load
+            setTimeout(() => startAutoBotFlow(sessionId), 10000);
+        }
     });
 
     session.client.on('authenticated', () => {
@@ -138,10 +203,10 @@ function initializeClient(sessionId) {
         session.clientStatus = 'DISCONNECTED';
         session.currentQR = null;
         session.isBotRunning = false;
+        session.cachedGroupId = null;
         clearTimeout(session.nextTimeoutId);
         sendLog(sessionId, `Client was logged out: ${reason}`);
         broadcastState(sessionId);
-        // Restart client to get new QR
         console.log(`[WHATSAPP - ${sessionId}] Restarting client...`);
         initializeClient(sessionId);
     });
@@ -154,7 +219,52 @@ function initializeClient(sessionId) {
     });
 }
 
-// Bot auto-messaging logic
+// --- Auto-restart browser on repeated failures ---
+async function handleRepeatedFailure(sessionId) {
+    const session = sessions[sessionId];
+    if (!session) return;
+
+    session.consecutiveFailures++;
+    console.log(`[STABILITY - ${sessionId}] Consecutive failures: ${session.consecutiveFailures}/3`);
+
+    if (session.consecutiveFailures >= 3) {
+        sendLog(sessionId, '⚠️ 3 consecutive failures detected. Auto-restarting browser...');
+        
+        // Save current bot config to resume after restart
+        session.pendingBotConfig = {
+            sendMode: session.autoMessageSendMode,
+            groupName: session.autoMessageTargetGroup,
+            targetNumbers: session.autoMessageTargetNumbers,
+            message: session.autoMessageText,
+            media: session.autoMessageMedia,
+            minMinutes: session.minIntervalActive,
+            maxMinutes: session.maxIntervalActive,
+        };
+
+        // Stop the bot loop
+        session.isBotRunning = false;
+        clearTimeout(session.nextTimeoutId);
+        session.cachedGroupId = null;
+        broadcastState(sessionId);
+
+        // Destroy and re-initialize (auth is preserved via LocalAuth)
+        try {
+            if (session.client) {
+                await session.client.destroy();
+                session.client = null;
+            }
+        } catch (e) {
+            console.error(`[STABILITY - ${sessionId}] Error destroying client:`, e.message);
+        }
+
+        // Wait a moment before re-initializing
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        sendLog(sessionId, '🔄 Re-initializing WhatsApp client...');
+        initializeClient(sessionId);
+    }
+}
+
+// --- Bot auto-messaging logic (OPTIMIZED) ---
 async function executeSendTask(sessionId) {
     const session = sessions[sessionId];
     if (!session || !session.client) {
@@ -163,55 +273,100 @@ async function executeSendTask(sessionId) {
     }
 
     try {
-        let mediaObj = null;
-        if (session.autoMessageMedia) {
-            mediaObj = new MessageMedia(session.autoMessageMedia.mimetype, session.autoMessageMedia.data, session.autoMessageMedia.filename);
+        await retryWithBackoff(async () => {
+            let mediaObj = null;
+            if (session.autoMessageMedia) {
+                mediaObj = new MessageMedia(
+                    session.autoMessageMedia.mimetype,
+                    session.autoMessageMedia.data,
+                    session.autoMessageMedia.filename
+                );
+            }
+
+            if (session.autoMessageSendMode === 'group') {
+                // Use cached group ID instead of fetching all chats every time
+                if (!session.cachedGroupId) {
+                    console.log(`[EXECUTE - ${sessionId}] No cached group ID, looking up group...`);
+                    const chats = await withTimeout(
+                        session.client.getChats(),
+                        120000,
+                        'getChats'
+                    );
+                    const group = chats.find(chat => chat.isGroup && chat.name === session.autoMessageTargetGroup);
+                    if (group) {
+                        session.cachedGroupId = group.id._serialized;
+                        console.log(`[EXECUTE - ${sessionId}] Cached group ID: ${session.cachedGroupId}`);
+                    } else {
+                        throw new Error(`Group "${session.autoMessageTargetGroup}" not found`);
+                    }
+                }
+
+                // Use getChatById with cached ID (much lighter than getChats)
+                console.log(`[EXECUTE - ${sessionId}] Sending to cached group: ${session.cachedGroupId}`);
+                const chat = await withTimeout(
+                    session.client.getChatById(session.cachedGroupId),
+                    60000,
+                    'getChatById'
+                );
+
+                if (mediaObj) {
+                    await withTimeout(
+                        chat.sendMessage(mediaObj, { caption: session.autoMessageText || undefined }),
+                        60000,
+                        'sendMessage(media)'
+                    );
+                } else if (session.autoMessageText) {
+                    await withTimeout(
+                        chat.sendMessage(session.autoMessageText),
+                        60000,
+                        'sendMessage(text)'
+                    );
+                }
+                sendLog(sessionId, `✅ [${new Date().toLocaleTimeString()}] Sent auto-message to group`);
+
+            } else if (session.autoMessageSendMode === 'numbers') {
+                const numbers = session.autoMessageTargetNumbers.split(',').map(n => n.trim()).filter(n => n);
+                for (const num of numbers) {
+                    const chatId = num.includes('@c.us') ? num : `${num}@c.us`;
+                    if (mediaObj) {
+                        await withTimeout(
+                            session.client.sendMessage(chatId, mediaObj, { caption: session.autoMessageText || undefined }),
+                            60000,
+                            `sendMessage(media to ${num})`
+                        );
+                    } else if (session.autoMessageText) {
+                        await withTimeout(
+                            session.client.sendMessage(chatId, session.autoMessageText),
+                            60000,
+                            `sendMessage(text to ${num})`
+                        );
+                    }
+                    sendLog(sessionId, `✅ [${new Date().toLocaleTimeString()}] Sent auto-message to ${num}`);
+                    // Small delay between numbers
+                    await new Promise(resolve => setTimeout(resolve, 3000));
+                }
+            }
+        }, {
+            maxRetries: 3,
+            baseDelayMs: 5000,
+            label: `SendTask(${sessionId})`
+        });
+
+        // Reset failure count on success
+        session.consecutiveFailures = 0;
+
+    } catch (err) {
+        console.error(`[EXECUTE - ${sessionId}] All retries exhausted:`, err.message);
+        sendLog(sessionId, `❌ Send failed after 3 retries: ${err.message}`);
+
+        // If it's a timeout/protocol error, invalidate the cached group ID
+        if (err.message.includes('timeout') || err.message.includes('Runtime') || err.message.includes('Protocol')) {
+            session.cachedGroupId = null;
+            sendLog(sessionId, '🔧 Cleared cached group ID due to browser issue.');
         }
 
-        if (session.autoMessageSendMode === 'group') {
-            console.log(`[EXECUTE - ${sessionId}] Getting chats for group mode...`);
-            const chats = await session.client.getChats().catch(e => {
-                throw new Error(`Failed to get chats: ${e.message}`);
-            });
-            
-            const group = chats.find(chat => chat.isGroup && chat.name === session.autoMessageTargetGroup);
-            if (group) {
-                if (mediaObj) {
-                    await group.sendMessage(mediaObj, { caption: session.autoMessageText || undefined });
-                } else if (session.autoMessageText) {
-                    await group.sendMessage(session.autoMessageText);
-                }
-                sendLog(sessionId, `[${new Date().toLocaleTimeString()}] Sent auto-message to group ${group.name}`);
-            } else {
-                sendLog(sessionId, `[${new Date().toLocaleTimeString()}] Group "${session.autoMessageTargetGroup}" not found.`);
-            }
-        } else if (session.autoMessageSendMode === 'numbers') {
-            const numbers = session.autoMessageTargetNumbers.split(',').map(n => n.trim()).filter(n => n);
-            for (const num of numbers) {
-                const chatId = num.includes('@c.us') ? num : `${num}@c.us`;
-                try {
-                    if (mediaObj) {
-                        await session.client.sendMessage(chatId, mediaObj, { caption: session.autoMessageText || undefined });
-                    } else if (session.autoMessageText) {
-                        await session.client.sendMessage(chatId, session.autoMessageText);
-                    }
-                    sendLog(sessionId, `[${new Date().toLocaleTimeString()}] Sent auto-message to number ${num}`);
-                } catch (numErr) {
-                    console.error(`[EXECUTE - ${sessionId}] Error sending to ${num}:`, numErr.message);
-                    sendLog(sessionId, `[${new Date().toLocaleTimeString()}] Error sending to ${num}: ${numErr.message}`);
-                    if (numErr.message.includes('timeout') || numErr.message.includes('Runtime')) {
-                        sendLog(sessionId, `[CRITICAL] Browser timeout detected. You might need to refresh the session.`);
-                    }
-                }
-                await new Promise(resolve => setTimeout(resolve, 2000));
-            }
-        }
-    } catch (err) {
-        console.error(`[EXECUTE - ${sessionId}] General task error:`, err);
-        sendLog(sessionId, `Error executing send task: ${err.message}`);
-        if (err.message.includes('timeout') || err.message.includes('Runtime')) {
-            sendLog(sessionId, `[CRITICAL] Browser responsiveness issue detected. Applied timeout fix. Monitoring...`);
-        }
+        // Track failure and potentially auto-restart
+        await handleRepeatedFailure(sessionId);
     }
 }
 
@@ -219,21 +374,22 @@ function scheduleNextMessage(sessionId) {
     const session = sessions[sessionId];
     if (!session || !session.isBotRunning) return;
 
-    const minMs = session.minIntervalActive * 60000;
-    const maxMs = session.maxIntervalActive * 60000;
+    const minMs = session.minIntervalActive * 1000;
+    const maxMs = session.maxIntervalActive * 1000;
 
-    // Random time between minMs and maxMs
     const randomTimeMs = Math.floor(Math.random() * (maxMs - minMs + 1) + minMs);
     const secs = (randomTimeMs / 1000).toFixed(1);
 
-    sendLog(sessionId, `Next message scheduled in ${secs} seconds...`);
+    sendLog(sessionId, `⏳ Next message in ${secs} seconds...`);
 
     session.nextTimeoutId = setTimeout(async () => {
         if (!session.isBotRunning) return;
         await executeSendTask(sessionId);
 
-        // Schedule the next one recursively
-        scheduleNextMessage(sessionId);
+        // Only schedule next if bot is still running (might have been stopped by auto-restart)
+        if (session.isBotRunning) {
+            scheduleNextMessage(sessionId);
+        }
     }, randomTimeMs);
 }
 
@@ -243,38 +399,47 @@ async function startAutoBotFlow(sessionId) {
 
     try {
         if (session.autoMessageSendMode === 'group') {
-            const chats = await session.client.getChats();
+            sendLog(sessionId, `🔍 Looking up group: "${session.autoMessageTargetGroup}"...`);
+            const chats = await withTimeout(
+                session.client.getChats(),
+                120000,
+                'getChats(startup)'
+            );
             const group = chats.find(chat => chat.isGroup && chat.name === session.autoMessageTargetGroup);
 
             if (group) {
-                sendLog(sessionId, `Group found! Starting auto-message loop for: ${group.name}`);
+                // Cache the group ID for all future sends
+                session.cachedGroupId = group.id._serialized;
+                sendLog(sessionId, `✅ Group found! Cached ID: ${session.cachedGroupId}`);
+                sendLog(sessionId, `🚀 Starting auto-message loop for: ${group.name}`);
             } else {
-                sendLog(sessionId, `Group "${session.autoMessageTargetGroup}" not found.`);
+                sendLog(sessionId, `❌ Group "${session.autoMessageTargetGroup}" not found.`);
                 session.isBotRunning = false;
                 broadcastState(sessionId);
                 return;
             }
         } else {
-            sendLog(sessionId, `Starting auto-message loop for numbers: ${session.autoMessageTargetNumbers}`);
+            sendLog(sessionId, `🚀 Starting auto-message loop for numbers: ${session.autoMessageTargetNumbers}`);
         }
 
         session.isBotRunning = true;
+        session.consecutiveFailures = 0;
         broadcastState(sessionId);
 
         // Send the first message immediately
         await executeSendTask(sessionId);
 
-        // Schedule next
-        scheduleNextMessage(sessionId);
+        // Schedule next (only if bot is still running)
+        if (session.isBotRunning) {
+            scheduleNextMessage(sessionId);
+        }
     } catch (error) {
-        sendLog(sessionId, `Error starting bot: ${error.message}`);
+        sendLog(sessionId, `❌ Error starting bot: ${error.message}`);
         session.isBotRunning = false;
         broadcastState(sessionId);
     }
 }
 
-
-// --- API Endpoints ---
 
 // --- API Endpoints ---
 
@@ -299,7 +464,6 @@ app.post('/api/sessions', (req, res) => {
     const { sessionId } = req.body;
     if (!sessionId) return res.status(400).json({ error: 'sessionId is required' });
     
-    // Sanitize sessionId to avoid path traversal if used in file paths
     const sanitizedId = sessionId.replace(/[^a-zA-Z0-9_-]/g, '');
     
     if (sessions[sanitizedId]) {
@@ -325,7 +489,6 @@ app.delete('/api/sessions/:sessionId', async (req, res) => {
         delete sessions[sessionId];
     }
 
-    // Delete session data from disk
     const sessionPath = path.join(__dirname, '.wwebjs_auth', `session-${sessionId}`);
     if (fs.existsSync(sessionPath)) {
         try {
@@ -350,7 +513,11 @@ app.get('/api/groups', async (req, res) => {
 
     try {
         console.log(`[API - ${sessionId}] Fetching chats...`);
-        const chats = await session.client.getChats();
+        const chats = await withTimeout(
+            session.client.getChats(),
+            120000,
+            'getChats(API)'
+        );
         const groups = chats.filter(c => c.isGroup).map(c => ({ id: c.id._serialized, name: c.name }));
         res.json({ groups });
     } catch (err) {
@@ -360,14 +527,14 @@ app.get('/api/groups', async (req, res) => {
 });
 
 app.post('/api/start', async (req, res) => {
-    const { sessionId, sendMode, groupName, targetNumbers, message, minMinutes, maxMinutes, media } = req.body;
+    const { sessionId, sendMode, groupName, targetNumbers, message, minSeconds, maxSeconds, media } = req.body;
     const session = sessions[sessionId];
 
     if (!session || session.clientStatus !== 'CONNECTED') {
         return res.status(400).json({ error: 'Client not connected for this session' });
     }
 
-    if (!sendMode || (!message && !media) || minMinutes === undefined || maxMinutes === undefined) {
+    if (!sendMode || (!message && !media) || minSeconds === undefined || maxSeconds === undefined) {
         return res.status(400).json({ error: 'Missing required configuration fields' });
     }
 
@@ -380,10 +547,10 @@ app.post('/api/start', async (req, res) => {
     session.autoMessageTargetNumbers = targetNumbers || '';
     session.autoMessageText = message || '';
     session.autoMessageMedia = media || null;
-    session.minIntervalActive = minMinutes;
-    session.maxIntervalActive = maxMinutes;
+    session.minIntervalActive = minSeconds;
+    session.maxIntervalActive = maxSeconds;
+    session.cachedGroupId = null; // Clear cache on new start
 
-    // Start flow
     await startAutoBotFlow(sessionId);
 
     res.json({ success: true, message: 'Bot started' });
@@ -396,13 +563,13 @@ app.post('/api/stop', (req, res) => {
     if (!session) return res.status(400).json({ error: 'Session not found' });
 
     session.isBotRunning = false;
+    session.pendingBotConfig = null; // Cancel any pending auto-restart resume
     clearTimeout(session.nextTimeoutId);
+    session.cachedGroupId = null;
     sendLog(sessionId, 'Bot stopped by user.');
     broadcastState(sessionId);
     res.json({ success: true, message: 'Bot stopped' });
 });
-
-const fs = require('fs');
 
 app.post('/api/logout', async (req, res) => {
     const { sessionId } = req.body;
@@ -413,6 +580,7 @@ app.post('/api/logout', async (req, res) => {
     try {
         console.log(`[API - ${sessionId}] Processing Logout Request...`);
         session.isBotRunning = false;
+        session.pendingBotConfig = null;
         clearTimeout(session.nextTimeoutId);
 
         if (session.client) {
@@ -427,7 +595,6 @@ app.post('/api/logout', async (req, res) => {
             fs.rmSync(authDirPath, { recursive: true, force: true });
         }
 
-        // Re-initialize to get new QR
         initializeClient(sessionId);
 
         res.json({ success: true, message: 'Logged out successfully!' });
@@ -436,8 +603,6 @@ app.post('/api/logout', async (req, res) => {
         res.status(500).json({ error: 'Failed to complete logout', details: err.message });
     }
 });
-
-const path = require('path');
 
 // Serve frontend static files
 app.use(express.static(path.join(__dirname, 'public')));
