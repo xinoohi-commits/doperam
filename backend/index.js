@@ -328,22 +328,57 @@ async function executeSendTask(sessionId) {
                 const numbers = session.autoMessageTargetNumbers.split(',').map(n => n.trim()).filter(n => n);
                 for (const num of numbers) {
                     const chatId = num.includes('@c.us') ? num : `${num}@c.us`;
-                    if (mediaObj) {
-                        await withTimeout(
-                            session.client.sendMessage(chatId, mediaObj, { caption: session.autoMessageText || undefined }),
-                            60000,
-                            `sendMessage(media to ${num})`
+                    
+                    try {
+                        console.log(`[EXECUTE - ${sessionId}] Preparing to send to ${num} with presence simulation...`);
+                        const chat = await withTimeout(
+                            session.client.getChatById(chatId),
+                            30000,
+                            `getChatById(${num})`
                         );
-                    } else if (session.autoMessageText) {
-                        await withTimeout(
-                            session.client.sendMessage(chatId, session.autoMessageText),
-                            60000,
-                            `sendMessage(text to ${num})`
-                        );
+
+                        // 1. Mark as seen
+                        await chat.sendSeen();
+                        
+                        // 2. Random delay before typing (1-3s)
+                        await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 2000));
+                        
+                        // 3. Simulate typing
+                        await chat.sendStateTyping();
+                        
+                        // 4. Randomized "typing" duration (3-7s)
+                        const typingDuration = 3000 + Math.random() * 4000;
+                        await new Promise(resolve => setTimeout(resolve, typingDuration));
+
+                        if (mediaObj) {
+                            await withTimeout(
+                                session.client.sendMessage(chatId, mediaObj, { caption: session.autoMessageText || undefined }),
+                                60000,
+                                `sendMessage(media to ${num})`
+                            );
+                        } else if (session.autoMessageText) {
+                            await withTimeout(
+                                session.client.sendMessage(chatId, session.autoMessageText),
+                                60000,
+                                `sendMessage(text to ${num})`
+                            );
+                        }
+                        
+                        // 5. Explicitly clear typing state (though sending usually does this)
+                        try { await chat.clearState(); } catch (e) {}
+
+                        sendLog(sessionId, `✅ [${new Date().toLocaleTimeString()}] Sent auto-message to ${num}`);
+                    } catch (numErr) {
+                        console.error(`[EXECUTE - ${sessionId}] Failed to send to ${num}:`, numErr.message);
+                        sendLog(sessionId, `⚠️ Failed to send to ${num}: ${numErr.message}`);
                     }
-                    sendLog(sessionId, `✅ [${new Date().toLocaleTimeString()}] Sent auto-message to ${num}`);
-                    // Small delay between numbers
-                    await new Promise(resolve => setTimeout(resolve, 3000));
+
+                    // Randomized delay between DIFFERENT numbers (10-25s) to avoid bot-like pattern
+                    const interNumberDelay = 10000 + Math.random() * 15000;
+                    if (numbers.indexOf(num) < numbers.length - 1) {
+                        console.log(`[EXECUTE - ${sessionId}] Waiting ${Math.round(interNumberDelay/1000)}s before next number...`);
+                        await new Promise(resolve => setTimeout(resolve, interNumberDelay));
+                    }
                 }
             }
         }, {
