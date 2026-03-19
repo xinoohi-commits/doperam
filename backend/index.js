@@ -121,7 +121,7 @@ function initializeClient(sessionId) {
         authStrategy: new LocalAuth({ clientId: sessionId }),
         puppeteer: {
             executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
-            headless: 'new',
+            headless: true,
             protocolTimeout: 300000, // 5 minutes (up from 3 minutes)
             args: [
                 '--no-sandbox',
@@ -137,13 +137,10 @@ function initializeClient(sessionId) {
                 '--disable-sync',
                 '--disable-translate',
                 '--disable-domain-reliability',
-                '--js-flags=--max-old-space-size=256',
+                '--js-flags=--max-old-space-size=512',
                 '--disable-web-security',
                 '--no-zygote',
                 '--disable-features=IsolateOrigins,site-per-process',
-                // --- New memory optimization flags ---
-                '--single-process',
-                '--renderer-process-limit=1',
                 '--disable-component-update',
                 '--disable-background-timer-throttling',
                 '--disable-backgrounding-occluded-windows',
@@ -196,6 +193,15 @@ function initializeClient(sessionId) {
     session.client.on('auth_failure', (msg) => {
         console.error(`[WHATSAPP - ${sessionId}] Authentication failure:`, msg);
         sendLog(sessionId, `Auth failure: ${msg}`);
+    });
+
+    session.client.on('error', (err) => {
+        console.error(`[WHATSAPP - ${sessionId}] Client error:`, err);
+        sendLog(sessionId, `⚠️ Browser error: ${err.message}`);
+        // If it's a fatal error, handle it as a failure
+        if (err.message.includes('Session closed') || err.message.includes('Target closed') || err.message.includes('Protocol error')) {
+            handleRepeatedFailure(sessionId);
+        }
     });
 
     session.client.on('disconnected', (reason) => {
@@ -338,13 +344,21 @@ async function executeSendTask(sessionId) {
                         );
 
                         // 1. Mark as seen
-                        await chat.sendSeen();
+                        try {
+                            await chat.sendSeen();
+                        } catch (e) {
+                            console.warn(`[EXECUTE - ${sessionId}] sendSeen failed for ${num}: ${e.message}`);
+                        }
                         
                         // 2. Random delay before typing (1-3s)
                         await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 2000));
                         
                         // 3. Simulate typing
-                        await chat.sendStateTyping();
+                        try {
+                            await chat.sendStateTyping();
+                        } catch (e) {
+                            console.warn(`[EXECUTE - ${sessionId}] sendStateTyping failed for ${num}: ${e.message}`);
+                        }
                         
                         // 4. Randomized "typing" duration (3-7s)
                         const typingDuration = 3000 + Math.random() * 4000;
